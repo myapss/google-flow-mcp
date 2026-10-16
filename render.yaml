@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: google-flow-mcp
+    runtime: docker
+    plan: starter
+    envVars:
+      - key: USEAPI_TOKEN
+        sync: false
+      - key: MCP_ACCESS_KEY
+        generateValue: true
+      - key: PUBLIC_URL
+        sync: false
+    disk:
+      name: episodes
+      mountPath: /app/data
+      sizeGB: 5
