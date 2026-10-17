@@ -61,16 +61,16 @@ mcp = FastMCP(
 
 VIDEO_MODELS = Literal[
     "seedance-2.5", "seedance-2.0", "seedance-2.0-fast", "seedance-2.0-mini",
-    "kling-o3", "minimax-h3", "wan-3.0", "pixverse-c1", "v5.6",
+    "kling-o3", "minimax-h3", "wan-3.0", "pixverse-c1", "v5.6", "gemini-omni-flash",
 ]
 # how many reference images each fusion model accepts
 REF_LIMIT = {"seedance-2.5": 30, "seedance-2.0": 9, "seedance-2.0-fast": 9, "seedance-2.0-mini": 9,
-             "kling-o3": 7, "minimax-h3": 9, "wan-3.0": 10, "pixverse-c1": 7, "v5.6": 7}
+             "kling-o3": 7, "minimax-h3": 9, "wan-3.0": 10, "pixverse-c1": 7, "v5.6": 7, "gemini-omni-flash": 5}
 # which models accept the `audio` toggle (seedance-2.5 does NOT)
 AUDIO_TOGGLE = {"seedance-2.0", "seedance-2.0-fast", "seedance-2.0-mini", "kling-o3", "wan-3.0", "pixverse-c1", "v5.6"}
 # credits per second at 720p (list price, before plan discounts) — for estimates only
 CREDITS_PER_SEC_720 = {"seedance-2.5": 75, "seedance-2.0": 45, "seedance-2.0-fast": 30, "seedance-2.0-mini": 18,
-                       "kling-o3": 25, "minimax-h3": 30, "wan-3.0": 30, "pixverse-c1": 30, "v5.6": 30}
+                       "kling-o3": 25, "minimax-h3": 30, "wan-3.0": 30, "pixverse-c1": 30, "v5.6": 30, "gemini-omni-flash": 40}
 
 
 # --------------------------------------------------------------------------- #
@@ -424,7 +424,8 @@ async def generate_video(
     sample, if any) are attached automatically — mention them in the prompt as @image1 etc.
     seedance-2.5: 4-30 s, best consistency, no generated speech (use reference audio or add
     voice-over later). seedance-2.0 family / kling-o3: audio=true gives spoken dialogue from
-    quoted lines in the prompt. Cost ≈ credits/sec × duration (seedance-2.5 720p = 75/s)."""
+    quoted lines in the prompt. gemini-omni-flash: 3-10 s, 720p only, audio-native speech
+    (put dialogue in quotes), 5 refs, ~half the credits of seedance-2.5. Cost ≈ credits/sec × duration (seedance-2.5 720p = 75/s)."""
     refs: list[str] = []
     voice = None
     acct = email or DEFAULT_EMAIL
@@ -443,8 +444,8 @@ async def generate_video(
             body[f"frame_{i}_path"] = p
         for i, p in enumerate(reference_video_paths or [], start=1):
             body[f"video_{i}_path"] = p
-        if voice and model.startswith("seedance") or (voice and model == "wan-3.0"):
-            body["audio_1_path"] = voice
+        if voice and (model.startswith("seedance") or model == "wan-3.0"):
+            body["audio_1_path"] = voice  # omni / kling do not accept reference audio
         if "@image1" not in prompt.lower():
             body["prompt"] = f"@image1 is the main character; keep their exact face, hair and outfit. {prompt}"
         if audio is not None and model in AUDIO_TOGGLE:
@@ -582,7 +583,9 @@ async def produce_episode(
 
     scenes: one prompt per clip describing ACTION, SETTING, CAMERA and (for audio models)
     dialogue in quotes — not the character's looks; the saved references handle that.
-    duration: seconds per clip (seedance-2.5: 4-30; 2.0 family: 4-15; kling-o3: 3-15).
+    duration: seconds per clip (seedance-2.5: 4-30; 2.0 family: 4-15; kling-o3: 3-15;
+    gemini-omni-flash: 3-10). For a talking presenter, gemini-omni-flash (native voice) is
+    the natural pick; for cinematic shots, seedance-2.5.
     A 15-minute episode ≈ 90 scenes × 10 s and takes 1-2 h. Returns immediately with an
     episodeId; poll get_episode every ~2 min. Cost ≈ credits/sec × total seconds
     (seedance-2.5 720p: 75/s list → ~7,000 credits per minute before Ultra discount).
