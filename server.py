@@ -621,6 +621,82 @@ async def design_character(
     }
 
 
+async def _concat_raw(media: list[dict[str, Any]]) -> dict[str, Any]:
+    """One Flow concatenate call (2-10 clips). Returns the raw API response."""
+    return await _call("POST", "/videos/concatenate", json={"media": media}, timeout=600)
+
+
+async def _join_many(media_ids: list[str], trim_start: list[float], trim_end: list[float], filename: str) -> dict[str, Any]:
+    """Join any number of clips. Flow accepts 2-10 per call, so longer lists are joined in
+    rounds: batches of 10 -> intermediate clips -> joined again until one remains."""
+    ids = list(media_ids)
+    ts = list(trim_start) + [0.0] * (len(ids) - len(trim_start))
+    te = list(trim_end) + [0.0] * (len(ids) - len(trim_end))
+    rounds = 0
+    while len(ids) > 10:
+        rounds += 1
+        next_ids: list[str] = []
+        for i in range(0, len(ids), 10):
+            chunk = ids[i:i + 10]
+            if len(chunk) == 1:          # a lone leftover passes straight through
+                next_ids.append(chunk[0]); continue
+            media = []
+            for j, mid in enumerate(chunk):
+                item: dict[str, Any] = {"mediaGenerationId": mid}
+                if rounds == 1 and ts[i + j]: item["trimStart"] = ts[i + j]
+                if rounds == 1 and te[i + j]: item["trimEnd"] = te[i + j]
+                media.append(item)
+            r = await _concat_raw(media)
+            if not r.get("ok"):
+                return {"ok": False, "error": "Join failed in batch", "batch": i // 10, "detail": r}
+            # the API returns bytes, not an id: upload the intermediate back so it can be joined again
+            up = await _upload_bytes(base64.b64decode(r["encodedVideo"]), "video/mp4")
+            if not up.get("ok"):
+                return {"ok": False, "error": "Could not store intermediate join", "detail": up}
+            next_ids.append(up["mediaGenerationId"])
+        ids = next_ids
+        ts = [0.0] * len(ids); te = [0.0] * len(ids)
+    media = []
+    for j, mid in enumerate(ids):
+        item = {"mediaGenerationId": mid}
+        if rounds == 0 and ts[j]: item["trimStart"] = ts[j]
+        if rounds == 0 and te[j]: item["trimEnd"] = te[j]
+        media.append(item)
+    if len(media) == 1:
+        # nothing to join: fetch the single clip and store it
+        url = await _call("GET", f"/assets/{quote(media[0]['mediaGenerationId'], safe='')}")
+        if not url.get("ok") or not url.get("url"):
+            return {"ok": False, "error": "Could not fetch single clip", "detail": url}
+        async with httpx.AsyncClient(timeout=300, follow_redirects=True) as c:
+            data = (await c.get(url["url"])).content
+        return {"ok": True, "clips": 1, **_save_bytes(data, filename, "mp4")}
+    r = await _concat_raw(media)
+    if not r.get("ok"):
+        return r
+    if not r.get("encodedVideo"):
+        return {"ok": False, "error": "No video returned"}
+    return {"ok": True, "jobId": r.get("jobId"), "clips": len(media_ids), "joinRounds": rounds + 1,
+            **_save_mp4(r["encodedVideo"], filename)}
+
+
+async def _upload_bytes(data: bytes, ctype: str, email: Optional[str] = None) -> dict[str, Any]:
+    acct, err = await _resolve_email(email)
+    if err:
+        return err
+    async with httpx.AsyncClient(timeout=300) as client:
+        r = await client.post(f"{BASE}/assets/{quote(acct, safe='')}", headers={**HEADERS, "Content-Type": ctype}, content=data)
+    try:
+        body = r.json()
+    except Exception:
+        body = {"raw": r.text}
+    if r.status_code >= 400:
+        return {"ok": False, "status": r.status_code, "error": body}
+    mg = body.get("mediaGenerationId")
+    if isinstance(mg, dict):
+        mg = mg.get("mediaGenerationId")
+    return {"ok": True, "mediaGenerationId": mg}
+
+
 @mcp.tool()
 async def concatenate_videos(
     media_ids: list[str],
@@ -628,25 +704,14 @@ async def concatenate_videos(
     trim_end: Optional[list[float]] = None,
     filename: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Join 2-10 generated video clips (same account, same aspect ratio) into one
-    MP4, in order. Optional per-clip trims in seconds. The result is stored on this
-    server and returned as a downloadUrl (valid as long as the server keeps the file)."""
-    media = []
-    for i, mid in enumerate(media_ids[:10]):
-        item: dict[str, Any] = {"mediaGenerationId": mid}
-        if trim_start and i < len(trim_start) and trim_start[i]:
-            item["trimStart"] = trim_start[i]
-        if trim_end and i < len(trim_end) and trim_end[i]:
-            item["trimEnd"] = trim_end[i]
-        media.append(item)
-    r = await _call("POST", "/videos/concatenate", json={"media": media}, timeout=600)
-    if not r.get("ok"):
-        return r
-    if not r.get("encodedVideo"):
-        return {"ok": False, "error": "No video returned", "raw": {k: v for k, v in r.items() if k != "encodedVideo"}}
-    stem = (filename or f"episode-{int(time.time())}").replace("/", "_").removesuffix(".mp4")
-    saved = _save_mp4(r["encodedVideo"], stem)
-    return {"ok": True, "jobId": r.get("jobId"), "clips": r.get("inputsCount"), **saved}
+    """Join any number of generated video clips (same account, same aspect ratio) into
+    ONE MP4, in order. Optional per-clip trims in seconds. Long lists are joined in
+    rounds of 10 automatically. The result is stored on this server and returned as a
+    downloadUrl."""
+    if len(media_ids) < 1:
+        return {"ok": False, "error": "media_ids is empty"}
+    stem = (filename or f"joined-{int(time.time())}").replace("/", "_").removesuffix(".mp4")
+    return await _join_many(media_ids, trim_start or [], trim_end or [], stem)
 
 
 # ---- episode runner (background) ------------------------------------------ #
@@ -766,11 +831,13 @@ async def produce_episode(
     (a 10-scene episode takes roughly 8-15 minutes). Credits: omni-flash 8 s ≈ 12
     credits per scene; use veo-3.1-lite-low-priority for free clips on Ultra $199.
     aspect_ratio 'portrait' for Shorts, 'landscape' for normal YouTube.
+    Any number of scenes up to 200: a 15-minute episode is ~90 scenes of 10 s and comes
+    back as ONE MP4 (joining happens in rounds of 10 behind the scenes).
     """
     if not scenes:
         return {"ok": False, "error": "scenes is empty"}
-    if len(scenes) > 40:
-        return {"ok": False, "error": "Max 40 scenes per episode; split it up."}
+    if len(scenes) > 200:
+        return {"ok": False, "error": "Max 200 scenes per episode (~30 min at 10 s each); split it up."}
     ep_id = uuid.uuid4().hex
     slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40] or "episode"
     ep = {
