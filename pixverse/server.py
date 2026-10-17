@@ -325,7 +325,9 @@ async def design_character(
     reference audio on models that support it (Seedance). Costs ~3 image credits × 25.
     """
     base = (f"{description}. {style}. Plain neutral grey studio background, soft even lighting, "
-            f"head and shoulders, same outfit in every shot, no text, no watermark.")
+            f"head and shoulders, same outfit in every shot. A single portrait of ONE person only: "
+            f"no grid, no collage, no multiple panels, no text, no watermark. Keep the exact facial "
+            f"expression described; do not add a smile unless the description asks for one.")
     front = await generate_image(prompt=f"Front-facing character reference portrait, looking at camera. {base}",
                                  model="nano-banana-pro", aspect_ratio="3:4", count=1, email=email)
     if not front.get("ok"):
@@ -342,8 +344,8 @@ async def design_character(
         return {"ok": False, "step": "upload_front", "error": "Could not upload reference"}
     paths.append(p0); previews.append(f0["url"])
     extra_prompts = [
-        "The exact same person as the reference, identical face, hair and outfit, three-quarter view turned slightly left, relaxed natural smile.",
-        "The exact same person as the reference, identical face, hair and outfit, side profile view, neutral expression.",
+        "The exact same person as the reference, identical face, hair, expression and outfit, three-quarter view turned slightly left.",
+        "The exact same person as the reference, identical face, hair, expression and outfit, side profile view showing the left side of the head.",
     ][: max(0, min(views, 3) - 1)]
     for ep in extra_prompts:
         img = await generate_image(prompt=f"{ep} {base}", model="nano-banana-pro", aspect_ratio="3:4", count=1,
